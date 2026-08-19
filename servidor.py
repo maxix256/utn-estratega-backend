@@ -32,7 +32,7 @@ def consultar_groq(historial_cliente):
         })
         
     datos = {
-        "model": "llama3-8b-8192", # Modelo más rápido y estable para evitar errores 400
+        "model": "llama-3.3-70b-versatile", # Modelo activo y actualizado en Groq
         "messages": mensajes,
         "temperature": 0.7
     }

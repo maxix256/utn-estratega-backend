@@ -3,3 +3,4 @@ Flask-Cors
 requests
 gunicorn
 google-auth
+PyJWT[crypto]

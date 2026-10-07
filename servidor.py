@@ -9,6 +9,7 @@ from flask_cors import CORS
 import requests
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
+import jwt
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tutor-ia")
@@ -23,6 +24,14 @@ ORIGENES_PERMITIDOS += [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "")
 CORS(app, origins=ORIGENES_PERMITIDOS)
 
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "utn-estratega")
+
+# App Check: prueba que la petición viene de la app real y no de un script.
+#   off     -> no se verifica (por defecto)
+#   log     -> se verifica y solo se registra en los logs si falla (para medir antes de exigir)
+#   enforce -> se rechaza la petición si el token falta o es inválido
+APP_CHECK_MODE = os.environ.get("APP_CHECK_MODE", "off")
+FIREBASE_PROJECT_NUMBER = os.environ.get("FIREBASE_PROJECT_NUMBER", "")
+_jwks_app_check = jwt.PyJWKClient("https://firebaseappcheck.googleapis.com/v1/jwks", lifespan=21600)
 
 # Límites pensados para la capa gratuita de Groq: que un solo usuario no agote la cuota de todos.
 LIMITE_POR_MINUTO = 5
@@ -60,6 +69,21 @@ def verificar_usuario():
         return None, respuesta_error("El tutor está disponible solo para cuentas registradas.", 403)
 
     return datos["sub"], None
+
+
+def app_check_valido():
+    """Verifica el header X-Firebase-AppCheck contra las claves públicas de Firebase."""
+    token = request.headers.get("X-Firebase-AppCheck")
+    if not token:
+        return False, "sin token"
+    try:
+        clave = _jwks_app_check.get_signing_key_from_jwt(token)
+        jwt.decode(token, clave.key, algorithms=["RS256"],
+                   audience=f"projects/{FIREBASE_PROJECT_NUMBER}",
+                   issuer=f"https://firebaseappcheck.googleapis.com/{FIREBASE_PROJECT_NUMBER}")
+        return True, ""
+    except Exception as e:
+        return False, str(e)
 
 
 def excede_limite(uid):
@@ -127,6 +151,13 @@ def consultar_groq(mensajes_usuario):
 
 @app.route('/api/chat', methods=['POST'])
 def procesar_chat():
+    if APP_CHECK_MODE in ("log", "enforce"):
+        valido, motivo = app_check_valido()
+        if not valido:
+            log.warning("App Check inválido (%s): %s", APP_CHECK_MODE, motivo)
+            if APP_CHECK_MODE == "enforce":
+                return respuesta_error("No se pudo verificar la app. Recargá la página y probá de nuevo.", 401)
+
     uid, error = verificar_usuario()
     if error:
         return error

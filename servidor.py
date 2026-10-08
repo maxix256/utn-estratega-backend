@@ -1,4 +1,6 @@
 import os
+import re
+import html
 import time
 import logging
 import threading
@@ -36,6 +38,20 @@ _jwks_app_check = jwt.PyJWKClient("https://firebaseappcheck.googleapis.com/v1/jw
 # Límites pensados para la capa gratuita de Groq: que un solo usuario no agote la cuota de todos.
 LIMITE_POR_MINUTO = 5
 LIMITE_POR_DIA = 60
+
+# Buzón de sugerencias: el mail se manda con Resend (https://resend.com) y la clave vive solo en Render.
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+FEEDBACK_TO = os.environ.get("FEEDBACK_TO", "")  # tu casilla; con la cuenta gratis de Resend tiene que ser la de la cuenta
+FEEDBACK_FROM = os.environ.get("FEEDBACK_FROM", "UTN Estratega <onboarding@resend.dev>")
+FEEDBACK_ASUNTO = os.environ.get("FEEDBACK_ASUNTO", "Nuevo mensaje en UTN Estratega: {{type}}")
+FEEDBACK_POR_MINUTO = 1
+FEEDBACK_POR_DIA = 5
+FEEDBACK_GLOBAL_POR_DIA = 80   # por debajo de los 100 mails diarios del plan gratis de Resend
+FEEDBACK_MAX_CARACTERES = 2000
+FEEDBACK_TIPOS = {"Sugerencia", "Error", "Consulta"}
+_PLANTILLA_FEEDBACK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plantilla_feedback.html")
+# Variables con la sintaxis de EmailJS: {{var}} o {{{var}}}
+_VARIABLE = re.compile(r"\{\{\{?\s*(\w+)\s*\}?\}\}")
 # Largo máximo por mensaje. Las respuestas del tutor suelen ser largas y vuelven en el historial.
 MAX_CARACTERES = {"user": 4000, "assistant": 20000}
 ROLES_PERMITIDOS = {"user", "assistant"}  # el cliente nunca puede mandar mensajes "system"
@@ -50,11 +66,11 @@ def respuesta_error(mensaje, status):
     return jsonify({"respuesta": mensaje}), status
 
 
-def verificar_usuario():
-    """Devuelve el uid si el token de Firebase es válido y no es una cuenta de invitado."""
+def verificar_usuario(permitir_invitados=False):
+    """Devuelve los datos del token de Firebase si es válido. Por defecto rechaza cuentas de invitado."""
     cabecera = request.headers.get("Authorization", "")
     if not cabecera.startswith("Bearer "):
-        return None, respuesta_error("Tenés que iniciar sesión para usar el tutor.", 401)
+        return None, respuesta_error("Tenés que iniciar sesión.", 401)
 
     try:
         datos = id_token.verify_firebase_token(cabecera[7:], _google_request, audience=FIREBASE_PROJECT_ID)
@@ -65,10 +81,21 @@ def verificar_usuario():
     if not datos or datos.get("iss") != f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}":
         return None, respuesta_error("Tu sesión expiró. Volvé a iniciar sesión.", 401)
 
-    if datos.get("firebase", {}).get("sign_in_provider") == "anonymous":
+    if not permitir_invitados and datos.get("firebase", {}).get("sign_in_provider") == "anonymous":
         return None, respuesta_error("El tutor está disponible solo para cuentas registradas.", 403)
 
-    return datos["sub"], None
+    return datos, None
+
+
+def chequear_app_check():
+    """Devuelve una respuesta de error si App Check está en enforce y el token no es válido."""
+    if APP_CHECK_MODE in ("log", "enforce"):
+        valido, motivo = app_check_valido()
+        if not valido:
+            log.warning("App Check inválido (%s): %s", APP_CHECK_MODE, motivo)
+            if APP_CHECK_MODE == "enforce":
+                return respuesta_error("No se pudo verificar la app. Recargá la página y probá de nuevo.", 401)
+    return None
 
 
 def app_check_valido():
@@ -86,15 +113,15 @@ def app_check_valido():
         return False, str(e)
 
 
-def excede_limite(uid):
+def excede_limite(clave, por_minuto=LIMITE_POR_MINUTO, por_dia=LIMITE_POR_DIA):
     """Ventana deslizante en memoria. Con varios workers de gunicorn, cada uno cuenta por separado."""
     ahora = time.time()
     with _lock:
-        tiempos = _peticiones_por_uid[uid]
+        tiempos = _peticiones_por_uid[clave]
         while tiempos and ahora - tiempos[0] > 86400:
             tiempos.popleft()
         ultimo_minuto = sum(1 for t in tiempos if ahora - t < 60)
-        if ultimo_minuto >= LIMITE_POR_MINUTO or len(tiempos) >= LIMITE_POR_DIA:
+        if ultimo_minuto >= por_minuto or len(tiempos) >= por_dia:
             return True
         tiempos.append(ahora)
         return False
@@ -151,18 +178,15 @@ def consultar_groq(mensajes_usuario):
 
 @app.route('/api/chat', methods=['POST'])
 def procesar_chat():
-    if APP_CHECK_MODE in ("log", "enforce"):
-        valido, motivo = app_check_valido()
-        if not valido:
-            log.warning("App Check inválido (%s): %s", APP_CHECK_MODE, motivo)
-            if APP_CHECK_MODE == "enforce":
-                return respuesta_error("No se pudo verificar la app. Recargá la página y probá de nuevo.", 401)
-
-    uid, error = verificar_usuario()
+    error = chequear_app_check()
     if error:
         return error
 
-    if excede_limite(uid):
+    usuario, error = verificar_usuario()
+    if error:
+        return error
+
+    if excede_limite(usuario["sub"]):
         return respuesta_error("Llegaste al límite de mensajes. Esperá un rato y probá de nuevo.", 429)
 
     peticion = request.get_json(silent=True) or {}
@@ -174,6 +198,72 @@ def procesar_chat():
     if respuesta_ia is None:
         return respuesta_error("El tutor no está disponible en este momento. Probá en unos minutos.", 502)
     return jsonify({"respuesta": respuesta_ia})
+
+
+def completar_plantilla(plantilla, variables, es_html=True):
+    """Reemplaza las variables de la plantilla. En HTML se escapa siempre lo que escribió el usuario."""
+    def valor(m):
+        texto = variables.get(m.group(1), "")
+        if not es_html:
+            return texto.replace("\n", " ")
+        return html.escape(texto).replace("\n", "<br>")
+    return _VARIABLE.sub(valor, plantilla)
+
+
+def enviar_mail_feedback(variables, responder_a):
+    if not RESEND_API_KEY or not FEEDBACK_TO:
+        log.error("Faltan RESEND_API_KEY o FEEDBACK_TO")
+        return False
+    with open(_PLANTILLA_FEEDBACK, encoding="utf-8") as f:
+        cuerpo = completar_plantilla(f.read(), variables)
+    datos = {
+        "from": FEEDBACK_FROM,
+        "to": [FEEDBACK_TO],
+        "subject": completar_plantilla(FEEDBACK_ASUNTO, variables, es_html=False)[:200],
+        "html": cuerpo,
+    }
+    if responder_a:
+        datos["reply_to"] = responder_a
+    try:
+        r = requests.post("https://api.resend.com/emails", json=datos, timeout=20,
+                          headers={"Authorization": f"Bearer {RESEND_API_KEY}"})
+        if r.status_code in (200, 201):
+            return True
+        log.error("Resend respondió %s: %s", r.status_code, r.text[:500])
+    except Exception as e:
+        log.exception("Error al llamar a Resend: %s", e)
+    return False
+
+
+@app.route('/api/feedback', methods=['POST'])
+def procesar_feedback():
+    error = chequear_app_check()
+    if error:
+        return error
+
+    # Los invitados también pueden dejar sugerencias, como antes con EmailJS
+    usuario, error = verificar_usuario(permitir_invitados=True)
+    if error:
+        return error
+
+    peticion = request.get_json(silent=True) or {}
+    tipo = peticion.get("tipo")
+    mensaje = peticion.get("mensaje")
+    if tipo not in FEEDBACK_TIPOS or not isinstance(mensaje, str) \
+            or not mensaje.strip() or len(mensaje) > FEEDBACK_MAX_CARACTERES:
+        return respuesta_error("El mensaje es inválido o demasiado largo.", 400)
+
+    if excede_limite("feedback:" + usuario["sub"], FEEDBACK_POR_MINUTO, FEEDBACK_POR_DIA):
+        return respuesta_error("Ya enviaste un mensaje hace poco. Esperá un rato y probá de nuevo.", 429)
+    if excede_limite("feedback:global", FEEDBACK_GLOBAL_POR_DIA, FEEDBACK_GLOBAL_POR_DIA):
+        return respuesta_error("El buzón recibió muchos mensajes hoy. Probá mañana.", 429)
+
+    # El mail del remitente sale del token verificado, nunca de lo que mande el cliente
+    email = usuario.get("email")
+    variables = {"user_email": email or "Invitado", "type": tipo, "message": mensaje}
+    if not enviar_mail_feedback(variables, email):
+        return respuesta_error("No se pudo enviar el mail, pero tu mensaje quedó guardado.", 502)
+    return jsonify({"respuesta": "ok"})
 
 
 if __name__ == '__main__':

@@ -1,13 +1,16 @@
 <!--
-  Plantilla del mail del buzón de sugerencias.
-  PROVISORIA: reemplazar por el HTML de la plantilla de EmailJS para mantener el mismo formato.
+  Plantilla del mail del buzón de sugerencias (copiada de la plantilla de EmailJS).
   Variables disponibles (misma sintaxis que EmailJS): {{user_email}}, {{type}}, {{message}}
   Todo lo que escribe el usuario se escapa antes de insertarse.
 -->
-<div style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;">
-  <h2 style="color: #4f46e5;">Nuevo mensaje en UTN Estratega</h2>
-  <p><strong>De:</strong> {{user_email}}</p>
-  <p><strong>Tipo:</strong> {{type}}</p>
-  <p><strong>Mensaje:</strong></p>
-  <p>{{message}}</p>
+<div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f8fafc; padding: 20px; border-radius: 12px; border: 1px solid #e2e8f0;">
+<h2 style="color: #4f46e5; text-align: center; margin-top: 0;">&iexcl;Hola M&aacute;ximo! 🚀</h2>
+<p style="color: #334155; font-size: 16px; text-align: center; line-height: 1.5;">&iexcl;Ten&eacute;s novedades en <strong>UTN Estratega</strong>!<br>Alguien acaba de dejarte un mensaje en el buz&oacute;n.</p>
+<div style="background-color: #ffffff; padding: 24px; border-radius: 8px; margin-top: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+<p style="margin: 0 0 12px 0; color: #475569; font-size: 15px;">👤 <strong>Usuario:</strong> <span style="color: #4f46e5; font-weight: 500;">{{user_email}}</span></p>
+<p style="margin: 0 0 20px 0; color: #475569; font-size: 15px;">🏷️ <strong>Categor&iacute;a:</strong> <span style="background-color: #e0e7ff; color: #3730a3; padding: 4px 10px; border-radius: 20px; font-size: 13px; font-weight: bold;">{{type}}</span></p>
+<h4 style="margin: 0 0 10px 0; color: #1e293b; font-size: 15px;">💬 El mensaje dice:</h4>
+<div style="background-color: #f1f5f9; padding: 16px; border-left: 4px solid #4f46e5; border-radius: 0 8px 8px 0; color: #334155; font-style: italic; font-size: 15px; line-height: 1.6;"><strong>{{message}}</strong></div>
+</div>
+<p style="text-align: center; color: #94a3b8; font-size: 14px; margin-top: 24px; font-weight: 500;">&iexcl;A seguir codeando! 💻🧉</p>
 </div>
